@@ -1,0 +1,940 @@
+---
+title: "R script for Comparative phylogenomic analyses of SNP versus full locus datasets:  insights and recommendations for researchers"
+author: "Prepared by Jacob S. Suissa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Overview
+
+This is an R Markdown document for the Cornell SIPS Plant Biology Phylogenetic Journal Club project exploring how SNP vs. locus data and missing data affect phylogeny topology, branch length, nodal support, node dating, and downstream phylogenetic comparative methods.
+
+# Load libraries
+
+First load the libraries
+
+```{r, include=TRUE}
+
+library(tidyverse)
+library(ape)
+library(phytools)
+library(geiger)
+library(ggdist)
+library(ggpubr)
+library(ggsci)
+library(RColorBrewer)
+
+devtools::install_github("YuLab-SMU/treeio")
+library(treeio)
+
+```
+
+# Import data
+
+Read in all the trees and make sure to subset the locus and the SNPS files
+```{r , include=FALSE}
+path<- "/Users/jacobsuissa/Documents/2_Postdoctoral_work/Side_projects/SNP_phylo_project/Data/Phylogenies/raxml/"
+```
+
+```{r , include=TRUE}
+
+
+alltreeFiles <-
+  list.files(
+    path = path,
+    pattern = "*all.raxml.support",
+    full.names = TRUE,
+    recursive = FALSE
+  )
+
+alltree_list <- list()
+
+for (i in 1:length(alltreeFiles)) {
+  a <-
+    paste(gsub("\\..*", "", basename(alltreeFiles[i])), ".tree", sep = "")
+  tree <- read.tree(alltreeFiles[i])
+  alltree_list[[a]] <- tree
+}
+
+#Same thing as above but for SNPS
+
+snptreeFiles <-
+  list.files(
+    path = path,
+    pattern = "*variant.raxml.support",
+    full.names = TRUE,
+    recursive = FALSE
+  )
+
+snptree_list <- list()
+
+for (i in 1:length(snptreeFiles)) {
+  a <-
+    paste(gsub("\\..*", "", basename(snptreeFiles[i])), ".tree", sep = "")
+  tree <- read.tree(snptreeFiles[i])
+  snptree_list[[a]] <- tree
+  
+}
+
+
+```
+
+
+#Print all the trees
+
+```{r, }
+# Loop through the list and plot each tree
+cophylo(tr1 = trees.list[[1]], tr2 = trees.list[[4]], rotate = FALSE)
+
+
+output_folder <- "/Users/jacobsuissa/Documents/2_Postdoctoral_work/Side_projects/SNP_phylo_project/Figures/R_figs/Raw_trees"
+
+for (i in seq_along(alltree_list)) {
+    # Get the name of the current tree
+    tree_name <- names(alltree_list)[i]
+  
+  # Define the PDF file name
+     file_name <- paste0(output_folder, "/Tree_locus", i, ".pdf")
+    
+    # Open a new PDF device
+    pdf(file = file_name, width = 8.5, height = 11)
+    
+    # Plot the tree
+    plot(alltree_list[[i]])
+    
+    # Add a title to the plot
+    title(main = tree_name)
+    
+    # Close the PDF device
+    dev.off()
+}
+#Same thing as above but for SNPS
+
+snptreeFiles <-
+  list.files(
+    path = path,
+    pattern = "*variant.raxml.support",
+    full.names = TRUE,
+    recursive = FALSE
+  )
+
+
+#Same thing for the snp tree
+
+for (i in seq_along(snptree_list)) {
+    # Get the name of the current tree
+    tree_name <- names(snptree_list)[i]
+  
+  # Define the PDF file name
+     file_name <- paste0(output_folder, "/Tree_SNP", i, ".pdf")
+    
+    # Open a new PDF device
+    pdf(file = file_name, width = 8.5, height = 11)
+    
+    # Plot the tree
+    plot(snptree_list[[i]])
+    
+    # Add a title to the plot
+    title(main = tree_name)
+    
+    # Close the PDF device
+    dev.off()
+}
+
+
+
+```
+
+
+
+# Analyze the data
+
+Extract all of the edge lengths and node label data from the trees
+
+```{r , echo=FALSE, include=FALSE}
+
+#quickly merge the two lists first before doing this
+
+total_tree_list <- do.call(c, list(snptree_list, alltree_list))
+
+totTree.dat <- 0
+
+for (i in 1:length(total_tree_list)) {
+  #make the name of the file a column
+  name.info <- names(total_tree_list[i])
+  #node number
+  nodeNum <- total_tree_list[[i]]$edge[, 1]
+  #nodal support
+  nodeSup <- total_tree_list[[i]]$node.label
+  #Branch lengths
+  edgeLength <- total_tree_list[[i]]$edge.length
+  q <- as.data.frame(cbind(name.info, nodeNum, nodeSup, edgeLength))
+  totTree.dat <- rbind(totTree.dat, q)
+  
+  }
+ 
+totTree.dat<- totTree.dat[-1,]
+
+#Make a new columns where we specifically denote the percent missing data, and whether its variant or full locus
+ 
+ totTree1.dat <- totTree.dat %>%
+   separate(col = name.info,
+            into = c("filter", "lab2"),
+            sep =  "[P]") %>% #seperate the label column after the _
+   separate(col = lab2,
+            into = c("seq_type", "lab4"),
+            sep =  "[.]")%>% #seperate the label column after the -
+   select(!c(lab4))%>%
+   mutate(seq_type = str_remove(seq_type, "[_]"))%>%
+   mutate(seq_type = ifelse(seq_type == "variant" , "SNP", "locus"))%>%
+   #for some reason all of these are not numeric so lets change that
+   mutate(nodeNum = as.numeric(nodeNum))%>%
+   mutate(nodeSup = as.numeric(nodeSup))%>%
+   mutate(edgeLength = as.numeric(edgeLength))
+```
+
+First make simple boxplots. Start with a boxplots of edgelength
+
+```{r}
+
+Order<-c( "0", "15", "30", "45", "60", "75", "90", "100") 
+
+edgePlot<- ggplot(totTree1.dat, aes(y=edgeLength, x=factor(filter, levels = Order))) +geom_point(aes(color=seq_type, alpha=0.5), size= 1, show.legend = FALSE,  position=position_jitterdodge())+ geom_boxplot(aes(fill=seq_type), alpha=0.4, outlier.colour = NA)+ xlab("Percent Shared Data")+ ylab("Branch lengths")+ scale_fill_manual(values= pal_npg("nrc", alpha = 0.7)(2))+ scale_color_manual(values= pal_npg("nrc", alpha = 0.6)(2)) + theme(text = element_text(size=12)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black")) 
+
+edgePlot
+
+```
+
+Plot branch lengths differently from edge lengths
+
+```{r, echo=FALSE}
+
+edgePlot <-ggplot(totTree1.dat, aes(y=edgeLength, x=factor(filter, levels = Order))) +geom_point(aes(color=seq_type, alpha=0.5), size= 1, show.legend = FALSE,  position=position_jitterdodge())+ geom_boxplot(aes(fill=seq_type), alpha=0.4, outlier.colour = NA)+ xlab("Percent Shared Data")+ ylab("Branch lengths")+ scale_fill_manual(values= pal_npg("nrc", alpha = 0.7)(2))+ scale_color_manual(values= pal_npg("nrc", alpha = 0.6)(2)) + theme(text = element_text(size=12)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black")) + facet_wrap(~seq_type, scales = "free")+guides(color=FALSE)+guides(fill=FALSE)
+
+edgePlot
+
+```
+
+Test the normality of both locus branch length datasets
+
+```{r}
+
+#Locus data
+loc.dat <- totTree1.dat%>%
+  filter(seq_type == "locus", .preserve = TRUE)
+
+# Shapiro-Wilk Test for Normality
+shapiro.test_result <- shapiro.test(loc.dat$edgeLength)
+shapiro_p_value <- shapiro.test_result$p.value
+
+# Q-Q Plot
+qq_plot <- qqnorm(loc.dat$edgeLength, plot.it = FALSE)
+qq_plot_data <- data.frame(Theoretical = qq_plot$x, Sample = qq_plot$y)
+qq_plot <- ggplot(qq_plot_data, aes(Theoretical, Sample)) +
+  geom_point()  +
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  ggtitle("Q-Q Plot") +
+  annotate("text", x = 2, y = 0.0001, label = paste("P-value:", shapiro_p_value)) +
+  annotate("text", x = 2, y = 0.00025, label = ifelse(shapiro_p_value < 0.01, "The data are not normally distributed", "The data are normally distributed"), color = ifelse(shapiro_p_value < 0.01, "red", "black"))
+
+# Display the Q-Q plot with annotations
+print(qq_plot)
+
+```
+
+Test the normality of both snp branch length datasets
+
+```{r}
+
+#SNP data
+SNP.dat <- totTree1.dat%>%
+  filter(seq_type == "SNP", .preserve = TRUE)
+
+# Shapiro-Wilk Test for Normality
+shapiro.test_result <- shapiro.test(SNP.dat$edgeLength)
+shapiro_p_value <- shapiro.test_result$p.value
+
+# Q-Q Plot
+qq_plot <- qqnorm(SNP.dat$edgeLength, plot.it = FALSE)
+qq_plot_data <- data.frame(Theoretical = qq_plot$x, Sample = qq_plot$y)
+qq_plot <- ggplot(qq_plot_data, aes(Theoretical, Sample)) +
+  geom_point() +
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  ggtitle("Q-Q Plot") +
+  annotate("text", x = 2, y = 0.01, label = paste("P-value:", shapiro_p_value)) +
+  annotate("text", x = 2, y = 0.025, label = ifelse(shapiro_p_value < 0.01, "The data are not normally distributed", "The data are normally distributed"), color = ifelse(shapiro_p_value < 0.01, "red", "black"))
+
+# Display the Q-Q plot with annotations
+print(qq_plot)
+
+```
+
+Make boxplots of nodal support
+
+```{r, echo=FALSE, warning=FALSE}
+
+Order<-c( "0", "15", "30", "45", "60", "75", "90", "100") 
+
+nodePlot<-ggplot(totTree1.dat, aes(y=nodeSup, x=factor(filter, levels = Order))) +geom_point(aes(color=seq_type, alpha=0.5), size= 1, show.legend = FALSE,  position=position_jitterdodge())+ geom_boxplot(aes(fill=seq_type), alpha=0.4, outlier.colour = NA)+ xlab("Percent Shared Data")+ ylab("Nodal support (bootstrap)")+ scale_fill_manual(values= pal_npg("nrc", alpha = 0.7)(2))+ scale_color_manual(values= pal_npg("nrc", alpha = 0.6)(2)) + theme(text = element_text(size=12)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))+ facet_wrap(~seq_type, scales = "free") +guides(color=FALSE)+guides(fill=FALSE)
+
+nodePlot
+```
+
+Explore relative branch lengths across each raxml tree. Bring in the BEAST data and explore patterns of node age across the different data and filtering types
+```{r , include=FALSE}
+path1<- "/Users/jacobsuissa/Documents/2_Postdoctoral_work/Side_projects/SNP_phylo_project/Data/Phylogenies/beast/"
+```
+
+```{r , echo=FALSE, include=FALSE}
+
+library(ips)
+
+allbeastTreeFiles <-
+  list.files(
+    path = path1,
+    pattern = "*all_MCC.tre",
+    full.names = TRUE,
+    recursive = FALSE
+  )
+
+allBeastTree_list <- list()
+allbeastDat_list <- list()
+
+
+for (i in 1:length(allbeastTreeFiles)) {
+  a <-
+    paste(gsub("\\..*", "", basename(allbeastTreeFiles[i])), ".tre", sep = "")
+  tree <- read.beast(allbeastTreeFiles[i])
+  dat <- tree@data
+  allBeastTree_list[[a]] <- tree
+  allbeastDat_list[[a]] <- dat
+}
+
+#Same thing as above but for SNPS
+
+snpbeastTreeFiles <-
+  list.files(
+    path = path1,
+    pattern = "*variant_MCC.tre",
+    full.names = TRUE,
+    recursive = FALSE
+  )
+
+snpbeastTree_list <- list()
+snpbeastDat_list <- list()
+
+for (i in 1:length(snpbeastTreeFiles)) {
+  a <-
+    paste(gsub("\\..*", "", basename(snpbeastTreeFiles[i])), ".tree", sep = "")
+  tree <- read.beast(snpbeastTreeFiles[i])
+  dat <- tree@data
+  snpbeastTree_list[[a]] <- tree
+  snpbeastDat_list[[a]] <- dat
+}
+
+
+```
+
+#Print all the trees
+
+```{r, }
+# Loop through the list and plot each tree
+
+output_folder <- "/Users/jacobsuissa/Documents/2_Postdoctoral_work/Side_projects/SNP_phylo_project/Figures/R_figs/Raw_trees"
+
+for (i in seq_along(allBeastTree_list)) {
+    # Get the name of the current tree
+    tree_name <- names(allBeastTree_list)[i]
+  
+  # Define the PDF file name
+     file_name <- paste0(output_folder, "/Tree_Beast_locus", i, ".pdf")
+    
+    # Open a new PDF device
+    pdf(file = file_name, width = 8.5, height = 11)
+    
+    # Plot the tree
+    plot(allBeastTree_list[[i]]@phylo)
+    
+    # Add a title to the plot
+    title(main = tree_name)
+    
+    # Close the PDF device
+    dev.off()
+}
+
+#Same thing for the snp tree
+
+for (i in seq_along(snpbeastTree_list)) {
+    # Get the name of the current tree
+    tree_name <- names(snpbeastTree_list)[i]
+  
+  # Define the PDF file name
+     file_name <- paste0(output_folder, "/Tree_Beast_SNP", i, ".pdf")
+    
+    # Open a new PDF device
+    pdf(file = file_name, width = 8.5, height = 11)
+    
+    
+    # Plot the tree
+    plot(snpbeastTree_list[[i]]@phylo)
+    
+    # Add a title to the plot
+    title(main = tree_name)
+    
+    # Close the PDF device
+    dev.off()
+}
+
+
+
+```
+
+
+
+Plot one of the beast trees to visualize
+
+```{r}
+
+plotTree(allBeastTree_list[["30P_all_MCC.tre"]]@phylo)
+
+```
+
+Extract all of the ages for the tree
+
+```{r , echo=FALSE, include=FALSE}
+
+#quickly merge the two lists first before doing this
+
+totalBeastDat_list <- do.call(c, list(snpbeastDat_list, allbeastDat_list))
+
+totBeastTree.dat <- 0
+
+for (i in 1:length(totalBeastDat_list)) {
+  #make the name of the file a column
+  name.info <- names(totalBeastDat_list[i])
+  
+  #Pull all the data
+  dat <- totalBeastDat_list[[i]] 
+
+  q <- as.data.frame(cbind(name.info, dat))
+  
+  totBeastTree.dat <- rbind(totBeastTree.dat, q)
+  
+  }
+ 
+totBeastTree.dat<- totBeastTree.dat[-1,]
+
+```
+
+Make a new columns where we specifically denote the percent missing data, and whether its variant or full locus
+
+```{r, echo=FALSE, include=TRUE, warning=FALSE}
+ totBeastTree1.dat <- totBeastTree.dat %>%
+   separate(col = name.info,
+            into = c("filtered", "lab2"),
+            sep =  "[P]", remove = FALSE) %>% #seperate the label column after the _
+   separate(col = lab2,
+            into = c("lab4", "seq_type", "lab5"),
+            sep =  "[_]", remove = FALSE)%>% #seperate the label column after the -
+   select(!c(lab4, lab5))%>%
+   mutate(seq_type = ifelse(seq_type == "variant" , "SNP", "locus"))%>%
+   #for some reason all of these are not numeric so lets change that
+  separate(col = CAheight_0.95_HPD,
+            into = c("early", "late"),
+            sep =  "[,]", remove = FALSE)%>%
+  mutate(early = str_remove(early, "[c]" ))%>%
+  mutate(early = str_remove(early, "[(]" ))%>%
+  mutate(late = str_remove(late, "[)]"))%>%
+  mutate(early = as.numeric(early))%>%
+  mutate(late = as.numeric(late))
+  
+
+```
+
+Plot the distributon of node ages as a function of percent missing data SNPS
+
+```{r, }
+snp_only <- totBeastTree1.dat%>%
+  filter(seq_type == "SNP", .preserve = TRUE )%>%
+  filter(!is.na(early), .preserve = TRUE)%>%
+  mutate(node = as.numeric(node))%>%
+  filter(node ==  "23"| node == "25"| node == "40" |node == "36" | node == "28" |node == "37" |node == "38"| node == "34" )%>%#Select a 8 nodes
+  mutate(across(node, factor, levels=c("23"  , "25"  , "40"  , "36"   , "28"  , "37"  , "38"  , "34")))
+
+ 
+  m <-ggplot(snp_only, aes(x= filtered, y=CAheight_mean, group = node )) +geom_point(aes(color= as.character(node) ), position = position_jitter(height = 0, width = 0, seed = 1)  , size=1) + facet_wrap(~node, nrow = 2, scales = "free" )+ guides(color="none") +geom_segment( aes(y=early, yend=late, x=filtered, xend= filtered, color= as.character(node)), position = position_jitter(height = 0, width = 0, seed = 1), size= 0.6) + guides(color=FALSE) + ylab("Node age (mya)")+ xlab("Percent Shared Data")+ scale_color_manual(values= pal_npg("nrc", alpha = 0.7)(8))+  theme(text = element_text(size=12)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))+facet_wrap(~node, nrow = 2, scales = "free" )
+
+
+#Then plot just the mean and run a linear regression!
+
+  n <-ggplot(snp_only, aes(x= filtered, y=CAheight_mean, group = node )) +geom_point(aes(color= as.character(node) ), position = position_jitter(height = 0, width = 0, seed = 1)  , size=1) + facet_wrap(~node, nrow = 2, scales = "free" )+ guides(color="none")+ geom_smooth(method = "lm", aes(color = as.character(node) ), se =FALSE )+   stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), size=2)  + guides(color=FALSE) + ylab("Node age (mya)")+ xlab("Percent Shared Data")+ scale_color_manual(values= pal_npg("nrc", alpha = 0.7)(8))+  theme(text = element_text(size=12)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))+facet_wrap(~node, nrow = 2, scales = "free" )
+
+
+
+ggarrange(m, n , 
+          labels = c("A", "B"),
+           nrow =2, widths = 8, heights = 5)
+
+```
+
+Plot the distributon of node ages as a function of percent missing data Locus
+
+```{r, }
+
+all_only <- totBeastTree1.dat%>%
+  filter(seq_type == "locus", .preserve = TRUE )%>%
+ filter(!is.na(early), .preserve = TRUE)%>%
+  mutate(node = as.numeric(node))%>%
+  filter(node ==  "23"| node == "25"| node == "40" |node == "36" | node == "28" |node == "37" |node == "38"| node == "34" )%>%#Select a 8 nodes
+  mutate(across(node, factor, levels=c("23"  , "25"  , "40"  , "36"   , "28"  , "37"  , "38"  , "34")))
+
+
+  l<- ggplot(all_only, aes(y= filtered, x=CAheight_mean )) +geom_point(aes(color= as.character(node) ),   position = position_jitter(height = 0, width = 0, seed = 1)  , size=1)  +geom_segment( aes(x=early, xend=late, y=filtered, yend= filtered, color= as.character(node)), position = position_jitter(height = 0, width = 0, seed = 1), size= 0.6)+scale_x_reverse() + guides(color=FALSE) + xlab("Node age (mya)")+ ylab("Percent Shared Data")+ scale_color_manual(values= pal_npg("nrc", alpha = 0.7)(8))+ facet_wrap(~node, nrow = 2, scales = "free" )+ theme(text = element_text(size=12)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+
+  p<-   ggplot(all_only, aes(x= filtered, y=CAheight_mean, group = node )) +geom_point(aes(color= as.character(node) ), position = position_jitter(height = 0, width = 0, seed = 1)  , size=1) + facet_wrap(~node, nrow = 2, scales = "free" )+ guides(color="none")+ geom_smooth(method = "lm", aes(color = as.character(node) ), se =FALSE )+   stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), size=2)  + guides(color=FALSE) + ylab("Node age (mya)")+ xlab("Percent Shared Data")+ scale_color_manual(values= pal_npg("nrc", alpha = 0.7)(8))+  theme(text = element_text(size=12)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))+facet_wrap(~node, nrow = 2, scales = "free" )
+
+
+
+ggarrange(l, p , 
+          labels = c("A", "B"),
+           nrow =2, widths = 8, heights = 5)
+
+```
+
+## Phylogenetic comparative methods
+
+Use trees from the 45% filtered trees to explore the impact of SNP vs. locus datasets and the use of phylograms vs. chronograms in PCMs.
+
+First create a funciton that trims data and puts it into the right format for stochastic character mapping
+
+```{r, echo=FALSE}
+
+Trim_data_and_Tree<- function(DAT, SPP, CHAR, TRE) {
+  data_1 <- DAT %>%
+    dplyr::distinct_(., SPP, .keep_all= TRUE)%>%
+    dplyr::select(SPP,CHAR)
+    
+  
+  df <- base::as.data.frame(data_1)
+  
+  rownames(df) <- df[,1]
+  
+  chk <- name.check(TRE,df)
+  
+  tree.pruned <- drop.tip(TRE, chk$tree_not_data)
+  Data.pruned <- df[!(rownames(df)%in% chk$data_not_tree),,drop=FALSE]
+  
+  newList <- list("pruned_data" = Data.pruned, "pruned_tree" = tree.pruned)
+  
+  return(newList)
+}
+```
+
+Run stochastic character mapping on the randomized data
+```{r , include=FALSE}
+path2<- "/Users/jacobsuissa/Documents/2_Postdoctoral_work/Side_projects/SNP_phylo_project/Data/Mock_data_anc.csv"
+path3<- "/Users/jacobsuissa/Documents/2_Postdoctoral_work/Side_projects/SNP_phylo_project/Data/Phylogenies/raxml/45P_all.raxml.support"
+path4<- "/Users/jacobsuissa/Documents/2_Postdoctoral_work/Side_projects/SNP_phylo_project/Data/Phylogenies/raxml/45P_variant.raxml.support"
+path5<- "/Users/jacobsuissa/Documents/2_Postdoctoral_work/Side_projects/SNP_phylo_project/Data/Phylogenies/beast/45P_all_MCC.tre"
+path6<- "/Users/jacobsuissa/Documents/2_Postdoctoral_work/Side_projects/SNP_phylo_project/Data/Phylogenies/beast/45P_variant_MCC.tre"
+
+```
+
+```{r, }
+#import data
+snp_mock.dat<-read.csv(path2)
+
+#bring in the three trees of interest
+
+locus_45raxml.tre<-read.tree(path3)
+
+snp_45raxml.tre<-read.tree(path4)
+
+locus_45beast.tre<-read.beast(path5)
+
+locus_45beast.tre <- as.phylo(locus_45beast.tre)
+
+snp_45beast.tre<-read.beast(path6) 
+
+snp_45beast.tre<-as.phylo(snp_45beast.tre)
+
+
+trees.list <- c(locus_45raxml.tre,snp_45raxml.tre,locus_45beast.tre, snp_45beast.tre  )
+
+trees.list.name <- c("locus_45raxml","snp_45raxml","locus_45beast", "snp_45beast"  )
+
+```
+
+Loop through each tree and run a stochastic character map and density map
+
+```{r,}
+
+mockdat.mode<-setNames(snp_mock.dat$State,snp_mock.dat$Tip)
+
+mockdat.mode<-as.factor(mockdat.mode) #This is essential now for some rason...
+
+simmap_list <- list()
+dmap_list <-list()
+summary_list<-list()
+for (i in 1:length(trees.list)) {
+
+  a <-make.simmap(tree = trees.list[i], x =mockdat.mode, model = "ARD", nsim = 1000, Q= "empirical" )
+
+  tree_file <- paste0( trees.list.name[i])
+  simmap_list[[tree_file]] <- a
+  
+  simmap_list[[i]] <- a
+  
+  
+  b <- densityMap(a,plot=FALSE)
+
+  dmap_list[[tree_file]] <- b
+  
+  c<- summary(a)
+  
+  summary_list[[tree_file]]<-c
+  
+}
+
+```
+
+Plot the simmaps
+
+```{r,}
+
+par(mfrow = c(2, 2))  # Set up a 2x2 grid layout for the plots
+
+
+
+for (i in 1:length(dmap_list)) {
+  
+  # Extract the file name
+  file_name <- names(dmap_list)[i]
+ 
+ 
+ plot(dmap_list[[file_name]])+ nodelabels(node = as.numeric(row.names(summary_list[[file_name]]$ace)), pie=summary_list[[file_name]]$ace, piecol = c("blue", "red"), cex=0.7 )
+  
+
+}
+
+```
+
+Run ancestral character estimation on a continuous character
+
+using the randomly generated data between 0 — 1 that was independently generated in using a random generator function
+
+```{r, }
+
+# Set the parameters for the Brownian motion simulation
+#sigma <- 1  # Trait evolutionary rate
+#nsim <- 1  # Number of simulations
+
+# Simulate the continuous trait using Brownian motion
+#sim_data <- fastBM(snp_45beast.tre, sigma = sigma, nsim = nsim)
+
+# check out the data
+
+
+#import data
+snp_mock.dat<-read.csv(path2)
+
+#format properly
+fmod<- setNames(snp_mock.dat$Cont_state, snp_mock.dat$Tip)
+
+```
+
+Loop through and make cont maps
+
+```{r, }
+
+#Make anc recons TEST
+fitBM<-anc.ML(snp_45beast.tre,fmod,model="BM")
+
+
+BM<-contMap(snp_45beast.tre,fmod, method="user",anc.states=fitBM$ace,plot=FALSE)
+
+#Make them for all the trees
+library(RColorBrewer)
+
+fit_list <-list()
+contmap_list <- list()
+
+for (i in 1:length(tree.list)) {
+  
+  a <-anc.ML(tree = tree.list[[i]], x =fmod, model = "BM" )
+  
+  tree_file <- paste0( tree.list.name[i])
+  fit_list[[tree_file]] <- a
+  
+  fit_list[[i]] <- a
+  
+  b<-contMap(tree.list[[i]],fmod, method="user",anc.states=a$ace,plot=FALSE)
+  
+  b <-setMap(b, brewer.pal(11,"Spectral"))
+  
+  
+  contmap_list[[tree_file]] <- b
+  
+  
+}
+
+```
+
+Plot the contmaps and save everything
+
+```{r,}
+
+par(mfrow = c(2, 2))  # Set up a 2x2 grid layout for the plots
+
+
+
+for (i in 1:length(contmap_list)) {
+  
+
+  # Extract the file name
+  file_name <- names(contmap_list)[i]
+ 
+ plot(contmap_list[[file_name]])
+
+}
+
+
+```
+
+
+
+
+
+
+Now move onto the simulated data
+
+
+
+
+
+
+
+Rerun analyses using the simulated dataset
+
+Read in all the trees and make sure to subset the locus and the SNPS files
+```{r , include=FALSE}
+#Import the raxml trees
+# Import data
+
+
+path<- "/Users/jacobsuissa/Documents/2_Postdoctoral_work/Side_projects/SNP_phylo_project/Data/Simulations/RAxML_trees"
+
+```
+
+```{r , include=TRUE}
+
+
+alltreeFiles <-
+  list.files(
+    path = path,
+    pattern = "all.min1.raxml.support",
+    full.names = TRUE,
+    recursive = FALSE
+  )
+
+alltree_list <- list()
+
+for (i in 1:length(alltreeFiles)) {
+  a <-
+    paste(gsub("\\..*", "", basename(alltreeFiles[i])), ".tree", sep = "")
+  tree <- read.tree(alltreeFiles[i])
+  alltree_list[[a]] <- tree
+}
+
+#Same thing as above but for SNPS
+
+snptreeFiles <-
+  list.files(
+    path = path,
+    pattern = "*var.min1.raxml.support",
+    full.names = TRUE,
+    recursive = FALSE
+  )
+
+snptree_list <- list()
+
+for (i in 1:length(snptreeFiles)) {
+  a <-
+    paste(gsub("\\..*", "", basename(snptreeFiles[i])), ".tree", sep = "")
+  tree <- read.tree(snptreeFiles[i])
+  snptree_list[[a]] <- tree
+  
+}
+
+
+```
+
+# Analyze the data
+
+Extract all of the edge lengths and node label data from the trees
+
+```{r , echo=FALSE, include=FALSE}
+
+#quickly merge the two lists first before doing this
+
+total_tree_list <- do.call(c, list(snptree_list, alltree_list))
+
+totTree.dat <- 0
+
+for (i in 1:length(total_tree_list)) {
+  #make the name of the file a column
+  name.info <- names(total_tree_list[i])
+  #node number
+  nodeNum <- total_tree_list[[i]]$edge[, 1]
+  #nodal support
+  nodeSup <- total_tree_list[[i]]$node.label
+  #Branch lengths
+  edgeLength <- total_tree_list[[i]]$edge.length
+  q <- as.data.frame(cbind(name.info, nodeNum, nodeSup, edgeLength))
+  totTree.dat <- rbind(totTree.dat, q)
+  
+  }
+ 
+totTree.dat<- totTree.dat[-1,]
+
+#Make a new columns where we specifically denote the percent missing data, and whether its variant or full locus
+ 
+ totTree1.dat <- totTree.dat %>%
+   separate(col = name.info,
+            into = c("filter", "lab2"),
+            sep =  "[P]") %>% #seperate the label column after the _
+   separate(col = lab2,
+            into = c("seq_type", "lab4"),
+            sep =  "[.]")%>% #seperate the label column after the -
+   select(!c(lab4))%>%
+   mutate(seq_type = str_remove(seq_type, "[_]"))%>%
+   mutate(seq_type = ifelse(seq_type == "var" , "SNP", "locus"))%>%
+   #for some reason all of these are not numeric so lets change that
+   mutate(nodeNum = as.numeric(nodeNum))%>%
+   mutate(nodeSup = as.numeric(nodeSup))%>%
+   mutate(edgeLength = as.numeric(edgeLength))
+
+```
+
+First make simple boxplots. Start with a boxplots of edgelength
+
+```{r}
+
+Order<-c( "0", "15", "30", "45", "60", "75", "90", "100") 
+
+edgePlot<- ggplot(totTree1.dat, aes(y=edgeLength, x=factor(filter, levels = Order))) +geom_point(aes(color=seq_type, alpha=0.5), size= 1, show.legend = FALSE,  position=position_jitterdodge())+ geom_boxplot(aes(fill=seq_type), alpha=0.4, outlier.colour = NA)+ xlab("Percent Shared Data")+ ylab("Branch lengths")+ scale_fill_manual(values= pal_npg("nrc", alpha = 0.7)(2))+ scale_color_manual(values= pal_npg("nrc", alpha = 0.6)(2)) + theme(text = element_text(size=12)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black")) 
+
+edgePlot
+
+```
+
+
+Plot branch lengths differently from edge lengths
+
+```{r, echo=FALSE}
+
+edgePlot <-ggplot(totTree1.dat, aes(y=edgeLength, x=factor(filter, levels = Order))) +geom_point(aes(color=seq_type, alpha=0.5), size= 1, show.legend = FALSE,  position=position_jitterdodge())+ geom_boxplot(aes(fill=seq_type), alpha=0.4, outlier.colour = NA)+ xlab("Percent Shared Data")+ ylab("Branch lengths")+ scale_fill_manual(values= pal_npg("nrc", alpha = 0.7)(2))+ scale_color_manual(values= pal_npg("nrc", alpha = 0.6)(2)) + theme(text = element_text(size=12)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black")) + facet_wrap(~seq_type, scales = "free")+guides(color=FALSE)+guides(fill=FALSE)
+
+edgePlot
+
+```
+
+Test the normality of both locus branch length datasets
+
+```{r}
+
+#Locus data
+loc.dat <- totTree1.dat%>%
+  filter(seq_type == "locus", .preserve = TRUE)
+
+# Shapiro-Wilk Test for Normality
+shapiro.test_result <- shapiro.test(loc.dat$edgeLength)
+shapiro_p_value <- shapiro.test_result$p.value
+
+# Q-Q Plot
+qq_plot <- qqnorm(loc.dat$edgeLength, plot.it = FALSE)
+qq_plot_data <- data.frame(Theoretical = qq_plot$x, Sample = qq_plot$y)
+qq_plot <- ggplot(qq_plot_data, aes(Theoretical, Sample)) +
+  geom_point()  +
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  ggtitle("Q-Q Plot") +
+  annotate("text", x = 2, y = 0.0001, label = paste("P-value:", shapiro_p_value)) +
+  annotate("text", x = 2, y = 0.00025, label = ifelse(shapiro_p_value < 0.01, "The data are not normally distributed", "The data are normally distributed"), color = ifelse(shapiro_p_value < 0.01, "red", "black"))
+
+# Display the Q-Q plot with annotations
+print(qq_plot)
+
+```
+
+Test the normality of both snp branch length datasets
+
+```{r}
+
+#SNP data
+SNP.dat <- totTree1.dat%>%
+  filter(seq_type == "SNP", .preserve = TRUE)
+
+# Shapiro-Wilk Test for Normality
+shapiro.test_result <- shapiro.test(SNP.dat$edgeLength)
+shapiro_p_value <- shapiro.test_result$p.value
+
+# Q-Q Plot
+qq_plot <- qqnorm(SNP.dat$edgeLength, plot.it = FALSE)
+qq_plot_data <- data.frame(Theoretical = qq_plot$x, Sample = qq_plot$y)
+qq_plot <- ggplot(qq_plot_data, aes(Theoretical, Sample)) +
+  geom_point() +
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  ggtitle("Q-Q Plot") +
+  annotate("text", x = 2, y = 0.01, label = paste("P-value:", shapiro_p_value)) +
+  annotate("text", x = 2, y = 0.025, label = ifelse(shapiro_p_value < 0.01, "The data are not normally distributed", "The data are normally distributed"), color = ifelse(shapiro_p_value < 0.01, "red", "black"))
+
+# Display the Q-Q plot with annotations
+print(qq_plot)
+
+```
+
+Make boxplots of nodal support
+
+```{r, echo=FALSE, warning=FALSE}
+
+Order<-c( "0", "15", "30", "45", "60", "75", "90", "100") 
+
+nodePlot<-ggplot(totTree1.dat, aes(y=nodeSup, x=factor(filter, levels = Order))) +geom_point(aes(color=seq_type, alpha=0.5), size= 1, show.legend = FALSE,  position=position_jitterdodge())+ geom_boxplot(aes(fill=seq_type), alpha=0.4, outlier.colour = NA)+ xlab("Percent Shared Data")+ ylab("Nodal support (bootstrap)")+ scale_fill_manual(values= pal_npg("nrc", alpha = 0.7)(2))+ scale_color_manual(values= pal_npg("nrc", alpha = 0.6)(2)) + theme(text = element_text(size=12)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))+ facet_wrap(~seq_type, scales = "free") +guides(color=FALSE)+guides(fill=FALSE)
+
+nodePlot
+```
+
+Compare the significance between boxplots
+
+```{r, }
+# We use paired = true because we are comparing multiple types of filterin on the same dataset
+SNP_dat <- totTree1.dat%>%
+  filter(seq_type == "SNP")%>%
+  filter(!is.na(nodeSup))
+
+result_nodesup.snp <- pairwise.wilcox.test(SNP_dat$nodeSup, SNP_dat$filter, p.adjust.method = "bonferroni", paired = TRUE)
+
+
+result_edge.snp <- pairwise.wilcox.test(SNP_dat$edgeLength, SNP_dat$filter, p.adjust.method = "bonferroni", paired = TRUE)
+
+
+# We use paired = true because we are comparing multiple types of filterin on the same dataset
+locus_dat <- totTree1.dat%>%
+  filter(seq_type == "locus")%>%
+  filter(!is.na(nodeSup))
+
+result_nodesup.locus <- pairwise.wilcox.test(locus_dat$nodeSup, locus_dat$filter, p.adjust.method = "bonferroni", paired = TRUE)
+
+
+result_edge.locus <- pairwise.wilcox.test(locus_dat$edgeLength, locus_dat$filter, p.adjust.method = "bonferroni", paired = TRUE)
+
+
+```
+
+
+#Done! If you. have any questions please email Jacob Suissa at [jsuissa\@utk.edu](mailto:jsuissa@utk.edu){.email}
